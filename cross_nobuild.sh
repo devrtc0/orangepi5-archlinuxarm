@@ -177,7 +177,7 @@ prepare_host_dirs() {
 }
 
 get_rkloaders() {
-    local rkloader_parent=https://github.com/7Ji/orangepi5-rkloader/releases/download/nightly
+    local rkloader_parent=https://github.com/devrtc0/orangepi5-rkloader/releases/download/nightly
     if [[ "${freeze_rkloaders}" && -f src/rkloader/list && -f src/rkloader/sha256sums ]]; then
         cp src/rkloader/{list,sha256sums} cache/rkloader/
     else
@@ -381,15 +381,27 @@ UUID=${uuid_root}	/	ext4	rw,noatime	0 1
 # boot partition with vfat on SDcard / USB drive
 UUID=${uuid_boot_specifier}	/boot	vfat	rw,noatime	0 2" >>  cache/root/etc/fstab
     # Timezone
-    ln -sf "/usr/share/zoneinfo/UTC" cache/root/etc/localtime
+    ln -sf "/usr/share/zoneinfo/Europe/Samara" cache/root/etc/localtime
     # Locale
-    sed -i 's/^#\(en_US.UTF-8  \)$/\1/g' cache/root/etc/locale.gen
+    printf 'en_US.UTF-8 UTF-8
+en_GB.UTF-8 UTF-8
+ru_RU.UTF-8 UTF-8
+' > cache/root/etc/locale.gen
     echo 'LANG=en_US.UTF-8' > cache/root/etc/locale.conf
 
     # Network
-    echo alarm > cache/root/etc/hostname
-    printf '127.0.0.1\tlocalhost\n::1\t\tlocalhost\n' >> cache/root/etc/hosts
+    echo opi5 > cache/root/etc/hostname
+    printf '127.0.0.1\tlocalhost
+::1\t\tlocalhost
+' >> cache/root/etc/hosts
     printf '[Match]\nName=eth* en*\n\n[Network]\nDHCP=yes\nDNSSEC=no\n' > cache/root/etc/systemd/network/20-wired.network
+    printf '[Match]
+Name=wl*
+
+[Network]
+DHCP=yes
+DNSSEC=no
+' > cache/root/etc/systemd/network/21-wireless.network
 
     # Users
     local sudoers=cache/root/etc/sudoers
@@ -403,10 +415,20 @@ UUID=${uuid_boot_specifier}	/boot	vfat	rw,noatime	0 2" >>  cache/root/etc/fstab
     # Temporary hack before https://gitlab.archlinux.org/archlinux/mkinitcpio/mkinitcpio/-/issues/218 is resolved
     sed -i 's/^HOOKS=(base udev autodetect modconf kms keyboard keymap consolefont block filesystems fsck)$/HOOKS=(base udev autodetect modconf keyboard keymap consolefont block filesystems fsck)/'  cache/root/etc/mkinitcpio.conf
 
+	CFG_USER_PASSWORD='$6$iQ./i1vR3AfQGQ9T$61t6QwRLf3.vco5gf3GUiCKTGCV8xSn8WqRMMVm5ifjXck2USbWAS26FKTZyXyCJoXH6bp7ED6TAUnUv1sTzX/'
     # Things that need to done inside the root
-    chroot cache/root /bin/bash -ec "locale-gen
+    chroot cache/root /bin/bash <<EOF
+locale-gen
 systemctl enable systemd-{network,resolve,timesync}d usb2host sshd
-useradd --groups wheel --create-home --password '"'$y$j9T$raNZsZE8wMTuGo2FHnYBK/$0Z0OEtF62U.wONdo.nyd/GodMLEh62kTdZXeb10.yT7'"' alarm"
+useradd -m -g users -G audio,video,power,storage,wheel,scanner,network -p '$CFG_USER_PASSWORD' -s /usr/bin/fish azat
+EOF
+
+    chroot cache/root sudo -u azat sh <<EOF
+mkdir -p /home/azat/.ssh
+printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKPBlmW9r5Y8Zj8cTxECLO9HEY+USByhVDxdPxq++oy2 id_ed25519
+' > /home/azat/.ssh/authorized_keys
+EOF
+
 }
 
 archive_root() {
@@ -505,7 +527,7 @@ ${spart_root}"
     done
 }
 
-release() {
+release_gz() {
     pids_gzip=()
     rm -rf out/latest
     mkdir out/latest
@@ -516,6 +538,19 @@ release() {
     done
     echo "Waiting for gzip processes to end..."
     wait ${pids_gzip[@]}
+}
+
+release() {
+    local pids=()
+    rm -rf out/latest
+    mkdir out/latest
+    for suffix in "${suffixes[@]}"; do
+        xz -z -9 -T 0 out/"${build_id}-${suffix}" &
+        pids+=($!)
+        ln -s ../"${build_id}-${suffix}".xz out/latest/
+    done
+    echo "Waiting for compressing processes to end..."
+    wait ${pids[@]}
 }
 
 get_subid() { #1 name #2 uid, #3 type
@@ -727,7 +762,7 @@ if [[ "${#install_pkgs_bootstrap[@]}" == 0 ]]; then
 fi
     
 if [[ "${#install_pkgs_normal[@]}" == 0 ]]; then
-    install_pkgs_normal=(vim nano sudo openssh linux-firmware-orangepi-git usb2host)
+    install_pkgs_normal=(vim nano sudo openssh linux-firmware-orangepi-git usb2host fish networkmanager)
 fi
 
 if [[ "${#install_pkgs_kernel[@]}" == 0 ]]; then
