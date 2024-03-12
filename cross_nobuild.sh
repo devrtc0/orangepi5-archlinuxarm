@@ -413,7 +413,7 @@ DNSSEC=no
     ln -sf /run/systemd/resolve/resolv.conf cache/root/etc/resolv.conf
 
     # Temporary hack before https://gitlab.archlinux.org/archlinux/mkinitcpio/mkinitcpio/-/issues/218 is resolved
-    sed -i 's/^HOOKS=(base udev autodetect modconf kms keyboard keymap consolefont block filesystems fsck)$/HOOKS=(base udev autodetect modconf keyboard keymap consolefont block filesystems fsck)/'  cache/root/etc/mkinitcpio.conf
+    sed -i 's/ kms / /'  cache/root/etc/mkinitcpio.conf
 
 	CFG_USER_PASSWORD='$6$iQ./i1vR3AfQGQ9T$61t6QwRLf3.vco5gf3GUiCKTGCV8xSn8WqRMMVm5ifjXck2USbWAS26FKTZyXyCJoXH6bp7ED6TAUnUv1sTzX/'
     # Things that need to done inside the root
@@ -766,7 +766,7 @@ if [[ "${#install_pkgs_normal[@]}" == 0 ]]; then
 fi
 
 if [[ "${#install_pkgs_kernel[@]}" == 0 ]]; then
-    install_pkgs_kernel=(linux-aarch64-orangepi5{,-git})
+    install_pkgs_kernel=(linux-aarch64-rockchip-rk3588-bsp5.10-orangepi{,-git})
 fi
 
 if [[ -z "${uuid_root}" ]]; then
