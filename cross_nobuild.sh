@@ -221,7 +221,7 @@ prepare_pacman_static() {
 
 mount_root() {
     mount tmpfs-root cache/root -t tmpfs -o mode=0755,nosuid 
-    mkdir -p cache/root/{boot,dev/{pts,shm},etc/pacman.d,proc,run,sys,tmp,var/{cache/pacman/pkg,lib/pacman,log}}
+    mkdir -p cache/root/{boot,dev/{pts,shm},etc/pacman.d,proc,run,sys/module,tmp,var/{cache/pacman/pkg,lib/pacman,log}}
     chmod 1777 cache/root/{dev/shm,tmp}
     chmod 555 cache/root/{proc,sys}
     mount proc cache/root/proc -t proc -o nosuid,noexec,nodev
@@ -246,7 +246,7 @@ umount_root_sub() {
         umount --lazy cache/root/dev/"${node}"
     done
     umount --lazy cache/root/proc
-    rm -rf cache/root/dev/*
+    rm -rf cache/root/sys/module cache/root/dev/*
 }
 
 prepare_pacman_configs() {
@@ -299,7 +299,7 @@ Server = https://github.com/7Ji/archrepo/releases/download/$arch' >> cache/root/
     disable_network
 }
 
-install_mkinitcpio() {
+install_initramfs() {
     # This is a huge hack, basically we disable post-transaction hook that would 
     # call mkinitcpio, so mkinitcpio won't be called in target, then we run 
     # mkinitcpio manually, with compression disabled, and also only create
@@ -307,41 +307,54 @@ install_mkinitcpio() {
     # We then compress the initcpio on host.
     # This avoids the performance penalty if mkinitcpio runs with compression in
     # target, as qemu is not that efficient
-    pacman_could_retry -S --config cache/pacman-strict.conf --noconfirm mkinitcpio
-    local mkinitcpio_conf=cache/root/etc/mkinitcpio.conf
-    cp "${mkinitcpio_conf}"{,.pacsave}
-    echo 'COMPRESSION=cat' >> "${mkinitcpio_conf}"
-    local mkinitcpio_install_hook=cache/root/usr/share/libalpm/hooks/90-mkinitcpio-install.hook
-    mv "${mkinitcpio_install_hook}"{,.pacsave}
+    if [[ "${initramfs}" == 'booster' ]]; then
+        pacman_could_retry -S --config cache/pacman-strict.conf --noconfirm booster
+        printf '%s: %s\n' \
+            'compression' 'none' \
+            'universal' 'true' > cache/root/etc/booster.yaml
+    else
+        pacman_could_retry -S --config cache/pacman-strict.conf --noconfirm mkinitcpio
+        local mkinitcpio_conf=cache/root/etc/mkinitcpio.conf
+        cp "${mkinitcpio_conf}"{,.pacsave}
+        echo 'COMPRESSION=cat' >> "${mkinitcpio_conf}"
+        local mkinitcpio_install_hook=cache/root/usr/share/libalpm/hooks/90-mkinitcpio-install.hook
+        mv "${mkinitcpio_install_hook}"{,.pacsave}
+    fi
 }
 
-unhack_mkinitcpio() {
-    local mkinitcpio_conf=cache/root/etc/mkinitcpio.conf
-    local mkinitcpio_install_hook=cache/root/usr/share/libalpm/hooks/90-mkinitcpio-install.hook
-    mv "${mkinitcpio_conf}"{.pacsave,}
-    mv "${mkinitcpio_install_hook}"{.pacsave,}
+unhack_initramfs() {
+    if [[ "${initramfs}" == 'booster' ]]; then
+        rm -f cache/root/etc/booster.yaml
+    else
+        local mkinitcpio_conf=cache/root/etc/mkinitcpio.conf
+        local mkinitcpio_install_hook=cache/root/usr/share/libalpm/hooks/90-mkinitcpio-install.hook
+        mv "${mkinitcpio_conf}"{.pacsave,}
+        mv "${mkinitcpio_install_hook}"{.pacsave,}
+    fi
 }
 
 setup_kernel() {
     if [[ ${#install_pkgs_kernel[@]} == 0 ]]; then
         return
     fi
-    local kernel
-    for kernel in "${install_pkgs_kernel[@]}"; do
-        local preset=cache/root/etc/mkinitcpio.d/"${kernel}".preset
-        cp "${preset}"{,.pacsave}
-        printf '\nPRESETS=(fallback)\n' >> "${preset}"
-    done
     for module_dir in cache/root/usr/lib/modules/*; do
         cp "${module_dir}"/vmlinuz cache/root/boot/vmlinuz-$(<"${module_dir}"/pkgbase)
     done
-    chroot cache/root mkinitcpio -P
+    if [[ "${initramfs}" == 'booster' ]]; then
+        chroot cache/root /usr/lib/booster/regenerate_images
+    else
+        chroot cache/root mkinitcpio -P
+    fi
     # Manually compress
+    local kernel file_initramfs
     for kernel in "${install_pkgs_kernel[@]}"; do
-        mv cache/root/etc/mkinitcpio.d/"${kernel}".preset{.pacsave,}
-        local initramfs=cache/root/boot/initramfs-"${kernel}"-fallback.img
-        zstd -T0 "${initramfs}"
-        mv "${initramfs}"{.zst,}
+        if [[ "${initramfs}" == 'booster' ]]; then
+            file_initramfs=cache/root/boot/booster-"${kernel}".img
+        else
+            file_initramfs=cache/root/boot/initramfs-"${kernel}"-fallback.img
+        fi
+        zstd -T0 "${file_initramfs}"
+        mv "${file_initramfs}"{.zst,}
     done
 }
 
@@ -351,14 +364,19 @@ setup_extlinux() {
     echo "MENU TITLE Select the kernel to boot
 TIMEOUT 30
 DEFAULT ${install_pkgs_kernel[0]}" > "${conf}"
-    local kernel
+    local kernel file_initramfs
     for kernel in "${install_pkgs_kernel[@]}"; do
+        if [[ "${initramfs}" == 'booster' ]]; then
+            file_initramfs="booster-${kernel}.img"
+        else
+            file_initramfs="initramfs-${kernel}-fallback.img"
+        fi
         printf \
-            "LABEL\t%s\n\tLINUX\t/%s\n\tINITRD\t/%s\n\tFDT\t/%s\n\tFDTOVERLAYS\t%s\n\tAPPEND\t%s\n" \
+            "LABEL\t%s\n\tLINUX\t/%s\n\tINITRD\t/%s\n\t#FDTDIR\t/%s\n\tFDT\t/%s\n\tFDTOVERLAYS\t%s\n\tAPPEND\t%s\n" \
             "${kernel}" \
             "vmlinuz-${kernel}" \
-            "initramfs-${kernel}-fallback.img" \
-            "dtbs/${kernel}/rockchip/rk3588s-orangepi-5.dtb" \
+            "${file_initramfs}" \
+            "dtbs/${kernel}"{,/rockchip/rk3588s-orangepi-5.dtb} \
             "${kernel}" \
             "root=UUID=${uuid_root} rw" >> "${conf}"
     done
@@ -413,7 +431,7 @@ DNSSEC=no
     ln -sf /run/systemd/resolve/resolv.conf cache/root/etc/resolv.conf
 
     # Temporary hack before https://gitlab.archlinux.org/archlinux/mkinitcpio/mkinitcpio/-/issues/218 is resolved
-    sed -i 's/ kms / /'  cache/root/etc/mkinitcpio.conf
+    [[ "${initramfs}" != booster ]] && sed -i 's/ kms / /'  cache/root/etc/mkinitcpio.conf
 
 	CFG_USER_PASSWORD='$6$iQ./i1vR3AfQGQ9T$61t6QwRLf3.vco5gf3GUiCKTGCV8xSn8WqRMMVm5ifjXck2USbWAS26FKTZyXyCJoXH6bp7ED6TAUnUv1sTzX/'
     # Things that need to done inside the root
@@ -611,6 +629,7 @@ spawn_and_wait() {
     unshare --user --pid --mount --fork \
         /bin/bash -e "${arg0}" --role child --uuid-root "${uuid_root}" --uuid-boot "${uuid_boot}" --build-id "${build_id}"  "${args[@]}" &
     pid_child="$!"
+    sleep 1
     newuidmap "${pid_child}" 0 "${uid}" 1 1 "${uid_start}" 65535
     newgidmap "${pid_child}" 0 "${gid}" 1 1 "${gid_start}" 65535
     wait "${pid_child}"
@@ -664,16 +683,16 @@ work_parent() {
 
 work_child() {
     trap "cleanup_child" INT TERM EXIT
-    sleep 1
+    sleep 3
     check_identity_map_root
     mount_root
     bootstrap_root
-    install_mkinitcpio
+    install_initramfs
     install_pkgs
     setup_root
     setup_kernel
     setup_extlinux
-    unhack_mkinitcpio
+    unhack_initramfs
     cleanup_pkgs
     umount_root_sub
     archive_root
@@ -779,6 +798,7 @@ fi
 uuid_boot_mkfs=${uuid_boot::8}
 uuid_boot_mkfs=${uuid_boot_mkfs^^}
 uuid_boot_specifier="${uuid_boot_mkfs::4}-${uuid_boot_mkfs:4}"
+initramfs="${initramfs:-booster}"
 
 case "${role}" in
     parent) work_parent;;
